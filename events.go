@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
 	"strconv"
@@ -15,6 +16,8 @@ import (
 )
 
 const pollErrTimeout = time.Second * 5
+
+var ErrTimeout = fmt.Errorf("Error timeout.")
 
 // An Event is a notification pushed to the client by the
 // server.
@@ -417,7 +420,7 @@ func (s *Session) EventStream() *EventStream {
 // If the stream is closed or fails with an error, a nil
 // event is returned with an error (io.EOF if the read
 // only failed because the stream was closed).
-func (s *Session) ReadEvent() (Event, error) {
+func (s *Session) ReadEvent(timeout time.Duration) (Event, error) {
 	s.defaultStreamLock.Lock()
 	if s.defaultStream == nil {
 		s.defaultStream = s.EventStream()
@@ -425,8 +428,13 @@ func (s *Session) ReadEvent() (Event, error) {
 	stream := s.defaultStream
 	s.defaultStreamLock.Unlock()
 
-	if evt, ok := <-stream.Chan(); ok {
-		return evt, nil
+	select {
+	case evt, ok := <-stream.Chan():
+		if ok {
+			return evt, nil
+		}
+	case <-time.After(timeout):
+		return nil, ErrTimeout
 	}
 	err := essentials.AddCtx("fbmsgr: read event", stream.Error())
 	if err == nil {

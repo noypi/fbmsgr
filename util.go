@@ -16,6 +16,10 @@ import (
 
 const dtsgTimeout = time.Hour * 8
 
+func ToTime(f float64) time.Time {
+	return time.Unix(int64(f/1000), (int64(f)%1000)*1000000)
+}
+
 // fetchDTSG fetches a usable value for the fb_dtsg field
 // present in many AJAX requests.
 //

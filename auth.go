@@ -2,17 +2,19 @@ package fbmsgr
 
 import (
 	"bytes"
+	"encoding/gob"
 	"errors"
 	"io"
+	"io/ioutil"
 	"math/rand"
 	"net/http"
-	"net/http/cookiejar"
 	"net/url"
 	"regexp"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/noypi/persistent-cookiejar"
 	"github.com/unixpickle/essentials"
 	"github.com/yhat/scrape"
 	"golang.org/x/net/html"
@@ -44,13 +46,8 @@ type Session struct {
 
 // Auth creates a new Session by authenticating with the
 // Facebook backend.
-func Auth(user, password string) (sess *Session, err error) {
+func Auth(client *http.Client, user, password string) (sess *Session, err error) {
 	defer essentials.AddCtxTo("fbmsgr: authenticate", &err)
-
-	jar, _ := cookiejar.New(nil)
-	client := &http.Client{
-		Jar: jar,
-	}
 
 	loginPage, err := client.Get(BaseURL + "/")
 	if loginPage != nil {
@@ -106,6 +103,55 @@ func (s *Session) FBID() string {
 	return s.userID
 }
 
+func (s *Session) DTSG() (dtsg string, t time.Time) {
+	return s.fbDTSG, s.fbDTSGTime
+}
+
+func (s *Session) MarshalGOB() ([]byte, error) {
+	m := map[string]interface{}{}
+	m["dstg"] = s.fbDTSG
+	m["dstgt"], _ = s.fbDTSGTime.MarshalBinary()
+	if o, ok := s.client.Jar.(*cookiejar.Jar); ok {
+		buf := bytes.NewBufferString("")
+		if err := o.SaveTo(nil, buf); nil != err {
+			return nil, err
+		}
+		m["persistent-jar"] = buf.Bytes()
+	}
+
+	buf := bytes.NewBufferString("")
+	if err := gob.NewEncoder(buf).Encode(m); nil != err {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}
+
+func UnmarshalGOB(r io.Reader) (*Session, error) {
+	m := map[string]interface{}{}
+	if err := gob.NewDecoder(r).Decode(&m); nil != err {
+		return nil, err
+	}
+
+	fbSess := new(Session)
+	fbSess.client = new(http.Client)
+	fbSess.fbDTSG = m["dstg"].(string)
+	bbTime := m["dstgt"].([]byte)
+	if err := fbSess.fbDTSGTime.UnmarshalBinary(bbTime); nil != err {
+		return nil, err
+	}
+	if jar, has := m["persistent-jar"]; has {
+		ojar, _ := cookiejar.New(nil)
+		jarbuf := ioutil.NopCloser(bytes.NewBuffer(jar.([]byte)))
+		if err := ojar.Load(jarbuf); nil != err {
+			return nil, err
+		}
+		fbSess.client.Jar = ojar
+	}
+
+	return fbSess, nil
+}
+
 func sessionForHomepage(c *http.Client, body io.Reader) (*Session, error) {
 	root, err := html.Parse(body)
 	if err != nil {
@@ -120,6 +166,16 @@ func sessionForHomepage(c *http.Client, body io.Reader) (*Session, error) {
 		userID:  userID,
 		randGen: rand.New(rand.NewSource(time.Now().UnixNano())),
 	}, nil
+}
+
+func SessionFromClient(client *http.Client, userID string, dtsg string, dtsgt time.Time) *Session {
+	return &Session{
+		client:     client,
+		userID:     userID,
+		randGen:    rand.New(rand.NewSource(time.Now().UnixNano())),
+		fbDTSG:     dtsg,
+		fbDTSGTime: dtsgt,
+	}
 }
 
 func requestLoginCookies(c *http.Client, body *html.Node) error {
